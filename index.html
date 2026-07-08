@@ -1,28 +1,66 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
-        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 8px; }
-        button { width: 100%; padding: 12px; background: #2678b6; color: white; border: none; border-radius: 8px; }
-    </style>
-</head>
-<body>
-    <h3>บันทึกรายจ่าย</h3>
-    <input type="text" id="item" placeholder="ชื่อรายการ">
-    <input type="number" id="amount" placeholder="ราคา">
-    <button onclick="save()">บันทึกข้อมูล</button>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script>
-        let tg = window.Telegram.WebApp;
-        tg.expand();
-        function save() {
-            let item = document.getElementById('item').value;
-            let amount = document.getElementById('amount').value;
-            tg.sendData(item + "," + amount);
-        }
-    </script>
-</body>
-</html>
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+import sqlite3
+from finance_manager import init_db, get_today_total, get_report, get_all_debts
+
+# --- แก้ไขตรงนี้ ---
+TOKEN = 'ใส่_TOKEN_ของคุณ'
+MY_ID = 123456789 
+WEB_APP_URL = 'https://username.github.io/my-bot-web/' # <--- ลิงก์จาก GitHub ของคุณ
+
+init_db()
+
+async def start(update: Update, context):
+    if update.effective_user.id != MY_ID: return
+    keyboard = [
+        [InlineKeyboardButton("💰 บันทึกรายจ่าย (WebApp)", web_app=WebAppInfo(url=WEB_APP_URL))],
+        [InlineKeyboardButton("📊 ยอดวันนี้", callback_data='daily_summary'),
+         InlineKeyboardButton("📊 รายเดือน", callback_data='report_month')],
+        [InlineKeyboardButton("📈 รายปี", callback_data='report_year'),
+         InlineKeyboardButton("🤝 หนี้เพื่อน", callback_data='view_debts')]
+    ]
+    await update.message.reply_text("เลือกเมนูใช้งาน:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# เพิ่มฟังก์ชันบันทึกข้อมูลแบบแยก 3 ค่า
+async def web_app_data(update: Update, context):
+    data = update.message.web_app_data.data
+    try:
+        # รับค่าจาก Web App ที่ส่งมาเป็น: ชื่อ,ราคา,วันที่
+        name, amount, date = data.split(',')
+        
+        # บันทึกลงฐานข้อมูลโดยใช้ข้อมูลวันที่ที่เลือกมา
+        conn = sqlite3.connect('finance.db')
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO expenses (date, item_name, amount) VALUES (?, ?, ?)", 
+                       (date, name, float(amount)))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ บันทึกสำเร็จ!\nรายการ: {name}\nวันที่: {date}\nราคา: {amount} บาท")
+    except Exception as e:
+        await update.message.reply_text("ข้อมูลผิดพลาด กรุณาลองใหม่")
+
+async def button_handler(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'daily_summary':
+        total = get_today_total()
+        await query.edit_message_text(f"💸 ยอดจ่ายรวมวันนี้: {total} บาท")
+    elif query.data in ['report_month', 'report_year']:
+        period = 'month' if query.data == 'report_month' else 'year'
+        data = get_report(period)
+        text = f"📊 สรุปยอด{period}:\n" + "\n".join([f"- {i}: {a} บาท" for i, a in data])
+        await query.edit_message_text(text or "ยังไม่มีข้อมูล")
+    elif query.data == 'view_debts':
+        debts = get_all_debts()
+        text = "รายการหนี้:\n" + "\n".join([f"- {d[1]}: {d[2]} บ." for d in debts])
+        await query.edit_message_text(text or "ไม่มีหนี้")
+
+if __name__ == '__main__':
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    # ตัวจัดการข้อมูลจาก Web App
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data))
+    app.run_polling()
